@@ -1,0 +1,359 @@
+-- SWILL FRUIT FARMER v3 (Delta)
+-- Цикл: 30 сек сбора -> хоп -> новый сервер -> повтор
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local VirtualUser = game:GetService("VirtualUser")
+local VirtualInput = game:GetService("VirtualInputManager")
+local TweenService = game:GetService("TweenService")
+local LocalPlayer = Players.LocalPlayer
+local PlaceId = game.PlaceId
+
+-- НАСТРОЙКИ
+local Config = {
+    FarmTime = 30,           -- Сколько секунд собирать на одном сервере
+    HopRetryDelay = 3,       -- Задержка между попытками хопа
+    MaxServerPlayers = 8,    -- Макс игроков в сервере
+    TweenSpeed = 300,        -- Скорость полёта
+    AntiAFK = true,
+    ScanInterval = 1.5       -- Как часто сканировать фрукты
+}
+
+local Enabled = true
+local IsHopping = false
+local VisitedServers = {}
+local HopAttempts = 0
+local StartTime = tick()
+
+-- ============================================
+-- ПОИСК ФРУКТОВ
+-- ============================================
+local function FindFruit()
+    for _, v in pairs(Workspace:GetChildren()) do
+        if v:IsA("Tool") or v:IsA("Model") then
+            local name = v.Name:lower()
+            if name:find("fruit") or name:find("dragon") or name:find("dough")
+               or name:find("leopard") or name:find("kitsune") then
+                return v
+            end
+        end
+    end
+    return nil
+end
+
+-- ============================================
+-- ТЕЛЕПОРТ К ФРУКТУ
+-- ============================================
+local function TeleportToFruit(fruit)
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+
+    local fruitPart = fruit:FindFirstChildWhichIsA("BasePart")
+    if not fruitPart and fruit:IsA("Tool") then
+        fruitPart = fruit:FindFirstChild("Handle")
+    end
+    if not fruitPart then return false end
+
+    local distance = (hrp.Position - fruitPart.Position).Magnitude
+    if distance > 500 then
+        hrp.CFrame = fruitPart.CFrame * CFrame.new(0, 5, 0)
+    else
+        local tweenInfo = TweenInfo.new(distance / Config.TweenSpeed, Enum.EasingStyle.Linear)
+        local tween = TweenService:Create(hrp, tweenInfo, {CFrame = fruitPart.CFrame * CFrame.new(0, 5, 0)})
+        tween:Play()
+        tween.Completed:Wait()
+    end
+    wait(0.3)
+    return true
+end
+
+-- ============================================
+-- СБОР ФРУКТА
+-- ============================================
+local function CollectFruit(fruit)
+    VirtualInput:SendMouseButtonEvent(0, 0, 1, true, game:GetService("UserInputService").MouseIcon, 0)
+    wait(0.1)
+    VirtualInput:SendMouseButtonEvent(0, 0, 1, false, game:GetService("UserInputService").MouseIcon, 0)
+    wait(0.15)
+    VirtualInput:SendKeyEvent(true, "E", false, nil)
+    wait(0.1)
+    VirtualInput:SendKeyEvent(false, "E", false, nil)
+    wait(0.2)
+end
+
+-- ============================================
+-- ПОЛУЧЕНИЕ СПИСКА СЕРВЕРОВ
+-- ============================================
+local function GetServers()
+    local url = "https://games.roblox.com/v1/games/" .. PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+    local success, response = pcall(function()
+        return HttpService:JSONDecode(game:HttpGet(url))
+    end)
+    if not success or not response or not response.data then
+        return {}
+    end
+    local servers = {}
+    for _, server in ipairs(response.data) do
+        if server.id ~= game.JobId
+           and server.playing < Config.MaxServerPlayers
+           and server.playing > 0
+           and not VisitedServers[server.id] then
+            table.insert(servers, server)
+        end
+    end
+    return servers
+end
+
+-- ============================================
+-- БЕСКОНЕЧНЫЙ ХОП (с разными серверами)
+-- ============================================
+local function InfiniteHop()
+    if IsHopping then return end
+    IsHopping = true
+
+    while Enabled do
+        HopAttempts = HopAttempts + 1
+        print("[SWILL] Попытка хопа #" .. HopAttempts)
+
+        local servers = GetServers()
+
+        if #servers == 0 then
+            print("[SWILL] Нет серверов — сброс списка")
+            VisitedServers = {}
+            wait(Config.HopRetryDelay)
+        else
+            -- Перемешиваем список, чтобы не долбить один и тот же
+            for i = #servers, 2, -1 do
+                local j = math.random(i)
+                servers[i], servers[j] = servers[j], servers[i]
+            end
+
+            for _, server in ipairs(servers) do
+                if not Enabled then
+                    IsHopping = false
+                    return
+                end
+
+                print("[SWILL] Пробуем сервер: " .. server.id .. " | Игроков: " .. server.playing)
+                VisitedServers[server.id] = true
+
+                local success = pcall(function()
+                    TeleportService:TeleportToPlaceInstance(PlaceId, server.id, LocalPlayer)
+                end)
+
+                if not success then
+                    print("[SWILL] Ошибка телепорта — следующий")
+                end
+
+                wait(Config.HopRetryDelay)
+            end
+        end
+
+        print("[SWILL] Все сервера не сработали — повтор")
+        wait(Config.HopRetryDelay)
+    end
+
+    IsHopping = false
+end
+
+-- ============================================
+-- GUI
+-- ============================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "SwillFruitFarmerV3"
+ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local Frame = Instance.new("Frame")
+Frame.Size = UDim2.new(0, 290, 0, 180)
+Frame.Position = UDim2.new(0.5, -145, 0.5, -90)
+Frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+Frame.BackgroundTransparency = 0.15
+Frame.BorderSizePixel = 0
+Frame.Parent = ScreenGui
+
+local Corner = Instance.new("UICorner")
+Corner.CornerRadius = UDim.new(0, 12)
+Corner.Parent = Frame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 25)
+Title.Position = UDim2.new(0, 0, 0, 5)
+Title.BackgroundTransparency = 1
+Title.Text = "SWILL FRUIT FARMER v3"
+Title.TextColor3 = Color3.fromRGB(255, 215, 0)
+Title.TextScaled = true
+Title.Font = Enum.Font.GothamBold
+Title.Parent = Frame
+
+local Status = Instance.new("TextLabel")
+Status.Size = UDim2.new(1, 0, 0, 20)
+Status.Position = UDim2.new(0, 0, 0, 30)
+Status.BackgroundTransparency = 1
+Status.Text = "Инициализация..."
+Status.TextColor3 = Color3.fromRGB(200, 200, 200)
+Status.TextScaled = true
+Status.Font = Enum.Font.Gotham
+Status.Parent = Frame
+
+local TimerLabel = Instance.new("TextLabel")
+TimerLabel.Size = UDim2.new(1, 0, 0, 18)
+TimerLabel.Position = UDim2.new(0, 0, 0, 50)
+TimerLabel.BackgroundTransparency = 1
+TimerLabel.Text = "До хопа: 30 сек"
+TimerLabel.TextColor3 = Color3.fromRGB(255, 200, 0)
+TimerLabel.TextScaled = true
+TimerLabel.Font = Enum.Font.Gotham
+TimerLabel.Parent = Frame
+
+local AttemptsLabel = Instance.new("TextLabel")
+AttemptsLabel.Size = UDim2.new(1, 0, 0, 18)
+AttemptsLabel.Position = UDim2.new(0, 0, 0, 68)
+AttemptsLabel.BackgroundTransparency = 1
+AttemptsLabel.Text = "Попыток хопа: 0"
+AttemptsLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+AttemptsLabel.TextScaled = true
+AttemptsLabel.Font = Enum.Font.Gotham
+AttemptsLabel.Parent = Frame
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0, 230, 0, 32)
+ToggleBtn.Position = UDim2.new(0.5, -115, 0, 92)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+ToggleBtn.Text = "✅ АКТИВЕН"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.TextScaled = true
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.BorderSizePixel = 0
+ToggleBtn.Parent = Frame
+
+local BtnCorner = Instance.new("UICorner")
+BtnCorner.CornerRadius = UDim.new(0, 8)
+BtnCorner.Parent = ToggleBtn
+
+local HopBtn = Instance.new("TextButton")
+HopBtn.Size = UDim2.new(0, 230, 0, 28)
+HopBtn.Position = UDim2.new(0.5, -115, 0, 132)
+HopBtn.BackgroundColor3 = Color3.fromRGB(50, 100, 200)
+HopBtn.Text = "ХОПНУТЬ СЕЙЧАС"
+HopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+HopBtn.TextScaled = true
+HopBtn.Font = Enum.Font.Gotham
+HopBtn.BorderSizePixel = 0
+HopBtn.Parent = Frame
+
+local HopCorner = Instance.new("UICorner")
+HopCorner.CornerRadius = UDim.new(0, 6)
+HopCorner.Parent = HopBtn
+
+-- ============================================
+-- ОСНОВНОЙ ЦИКЛ (30 секунд сбора -> хоп)
+-- ============================================
+local function MainLoop()
+    while Enabled do
+        wait(0.5)
+
+        if IsHopping then
+            Status.Text = "Хопаем..."
+            continue
+        end
+
+        -- Проверяем время на сервере
+        local elapsed = tick() - StartTime
+        local remaining = math.max(0, Config.FarmTime - math.floor(elapsed))
+        TimerLabel.Text = "До хопа: " .. remaining .. " сек"
+
+        -- Если прошло 30 секунд — хопаем
+        if elapsed >= Config.FarmTime then
+            Status.Text = "Время вышло — хопаем!"
+            print("[SWILL] 30 секунд истекли — хоп")
+            StartTime = tick()
+            spawn(InfiniteHop)
+            continue
+        end
+
+        -- Ищем фрукт
+        local fruit = FindFruit()
+
+        if fruit then
+            Status.Text = "Найден: " .. fruit.Name
+            print("[SWILL] Найден фрукт: " .. fruit.Name)
+
+            local success = TeleportToFruit(fruit)
+            if success then
+                wait(0.4)
+                CollectFruit(fruit)
+                Status.Text = "Собрал: " .. fruit.Name
+                print("[SWILL] Собрал: " .. fruit.Name)
+                wait(0.5)
+            end
+        else
+            Status.Text = "Фруктов нет — ищем..."
+            wait(Config.ScanInterval)
+        end
+    end
+end
+
+-- ============================================
+-- АНТИ-АФК
+-- ============================================
+if Config.AntiAFK then
+    spawn(function()
+        while Enabled do
+            wait(15)
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.new(0, 0))
+            end)
+        end
+    end)
+end
+
+-- ============================================
+-- ОБНОВЛЕНИЕ СЧЁТЧИКА
+-- ============================================
+spawn(function()
+    while Enabled do
+        wait(0.5)
+        AttemptsLabel.Text = "Попыток хопа: " .. HopAttempts
+    end
+end)
+
+-- ============================================
+-- ОБРАБОТЧИКИ
+-- ============================================
+ToggleBtn.MouseButton1Click:Connect(function()
+    Enabled = not Enabled
+    if Enabled then
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+        ToggleBtn.Text = "✅ АКТИВЕН"
+        Status.Text = "Запуск..."
+        StartTime = tick()
+        spawn(MainLoop)
+    else
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+        ToggleBtn.Text = "⛔ ВЫКЛЮЧЕН"
+        Status.Text = "Остановлен"
+    end
+end)
+
+HopBtn.MouseButton1Click:Connect(function()
+    if not IsHopping then
+        StartTime = tick()
+        spawn(InfiniteHop)
+    end
+end)
+
+-- ЗАПУСК
+Status.Text = "Готов | Поиск фруктов..."
+spawn(MainLoop)
+
+print("========================================")
+print("SWILL FRUIT FARMER v3 | Delta")
+print("Цикл: 30 сек сбора -> хоп")
+print("Бесконечный хоп: ВКЛ")
+print("Анти-АФК: ВКЛ")
+print("========================================")
